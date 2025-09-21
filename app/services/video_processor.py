@@ -521,21 +521,14 @@ class VideoProcessor:
         self._run_ffmpeg(transform_cmd, f"vidstabtransform for {input_path.name}")
 
     def _build_detect_filter(self, transform_path: Path) -> str:
-        return ",".join(
-            [
-                "format=bgr0",
-                f"vidstabdetect=result={transform_path}:stepsize=4:shakiness=6:accuracy=15",
-            ]
-        )
+        return f"vidstabdetect=result={transform_path}:stepsize=4:shakiness=6:accuracy=15"
 
     def _build_transform_filter(self, transform_path: Path) -> str:
         components = [
-            "format=bgr0",
             (
                 "vidstabtransform="
                 f"input={transform_path}:smoothing=15:maxshift=30:zoom=0.95:optalgo=gauss"
             ),
-            f"format={TARGET_PIXEL_FORMAT}",
             self._normalization_filter_chain(include_format=False),
             self._color_filter_chain(),
             f"format={TARGET_PIXEL_FORMAT}",

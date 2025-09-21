@@ -2,9 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from app.logging_config import setup_logging
 from app.paths import FINAL_UPLOAD_DIR, RAW_UPLOAD_DIR, ensure_directories
 from app.routers import processing, upload
 
+setup_logging()
 ensure_directories()
 
 app = FastAPI(

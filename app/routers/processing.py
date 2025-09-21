@@ -1,6 +1,8 @@
 import logging
+import time
 from pathlib import Path
 from typing import Dict, List
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -19,18 +21,33 @@ class ProcessRequest(BaseModel):
 
 @router.post("/process-walkthrough")
 async def process_video(request: Request, payload: ProcessRequest) -> Dict[str, str]:
+    request_id = request.headers.get("x-request-id") or uuid4().hex
+    client_host = request.client.host if request.client else "unknown"
+    clip_count = len(payload.clips)
+    logger.info(
+        "process-walkthrough start | request_id=%s project_id=%s client=%s clip_count=%d",
+        request_id,
+        payload.project_id,
+        client_host,
+        clip_count,
+    )
+    logger.debug(
+        "process-walkthrough clips | request_id=%s project_id=%s clips=%s",
+        request_id,
+        payload.project_id,
+        payload.clips,
+    )
+
     processor = VideoProcessor(payload.project_id, RAW_UPLOAD_DIR, FINAL_UPLOAD_DIR)
 
     try:
-        logger.info(
-            "Starting walkthrough processing for project %s with %d clips",
-            payload.project_id,
-            len(payload.clips),
-        )
+        start_time = time.perf_counter()
         output_path = processor.process_walkthrough(payload.clips)
+        duration_ms = (time.perf_counter() - start_time) * 1000
     except FileNotFoundError as exc:
         logger.error(
-            "Clip not found during processing for project %s: %s",
+            "process-walkthrough missing clip | request_id=%s project_id=%s error=%s",
+            request_id,
             payload.project_id,
             exc,
             exc_info=exc,
@@ -38,7 +55,8 @@ async def process_video(request: Request, payload: ProcessRequest) -> Dict[str, 
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         logger.error(
-            "Validation error during processing for project %s: %s",
+            "process-walkthrough validation error | request_id=%s project_id=%s error=%s",
+            request_id,
             payload.project_id,
             exc,
             exc_info=exc,
@@ -46,7 +64,8 @@ async def process_video(request: Request, payload: ProcessRequest) -> Dict[str, 
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         logger.error(
-            "FFmpeg processing failed for project %s: %s",
+            "process-walkthrough ffmpeg failure | request_id=%s project_id=%s error=%s",
+            request_id,
             payload.project_id,
             exc,
             exc_info=exc,
@@ -56,9 +75,11 @@ async def process_video(request: Request, payload: ProcessRequest) -> Dict[str, 
     output_name = Path(output_path).name
     output_url = request.url_for("processed-files", path=output_name)
     logger.info(
-        "Walkthrough processing completed for project %s: %s",
+        "process-walkthrough complete | request_id=%s project_id=%s output=%s duration_ms=%.2f",
+        request_id,
         payload.project_id,
         output_name,
+        duration_ms,
     )
     return {
         "project_id": payload.project_id,

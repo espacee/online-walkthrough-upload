@@ -35,13 +35,39 @@ class VideoProcessor:
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
+            logger.debug(
+                "Temporary working directory created for project %s: %s",
+                self.project_id,
+                temp_path,
+            )
             stabilized_paths = []
-            for index, clip_path in enumerate(resolved_inputs):
-                stabilized_path = temp_path / f"stabilized_{index:03d}.mp4"
-                self._stabilize_clip(clip_path, stabilized_path, index, temp_path)
+            clip_total = len(resolved_inputs)
+            for position, clip_path in enumerate(resolved_inputs, start=1):
+                logger.info(
+                    "Stabilizing clip %d/%d for project %s: %s",
+                    position,
+                    clip_total,
+                    self.project_id,
+                    clip_path.name,
+                )
+                zero_index = position - 1
+                stabilized_path = temp_path / f"stabilized_{zero_index:03d}.mp4"
+                self._stabilize_clip(clip_path, stabilized_path, zero_index, temp_path)
                 stabilized_paths.append(stabilized_path)
+                logger.debug(
+                    "Stabilization complete for project %s clip %s -> %s",
+                    self.project_id,
+                    clip_path.name,
+                    stabilized_path.name,
+                )
 
             output_path = self._concat_paths(stabilized_paths)
+
+        logger.debug(
+            "Processing routine finished for project %s; output located at %s",
+            self.project_id,
+            output_path,
+        )
 
         return output_path
 
@@ -106,6 +132,12 @@ class VideoProcessor:
             raise ValueError("At least one clip is required for processing.")
 
         output_path = self.final_dir / f"{self.project_id}_final.mp4"
+        logger.info(
+            "Concatenating %d stabilized clips for project %s into %s",
+            len(clip_paths),
+            self.project_id,
+            output_path.name,
+        )
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as concat_file:
             for clip_path in clip_paths:
                 concat_file.write(f"file '{clip_path}'\n")

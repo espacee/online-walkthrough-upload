@@ -1,6 +1,6 @@
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from typing import Dict, Optional
 from uuid import uuid4
@@ -24,6 +24,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.mount("/files", StaticFiles(directory=UPLOAD_DIR, check_dir=False), name="uploaded-files")
 
 
 async def save_upload_file(upload_file: UploadFile, destination: Path) -> None:
@@ -68,21 +70,8 @@ async def upload_video(
 
     await save_upload_file(file, file_path)
 
-    file_url = request.url_for("serve_video", filename=target_name)
+    file_url = request.url_for("uploaded-files", path=target_name)
     return {"url": str(file_url)}
-
-
-@app.get("/files/{filename}")
-async def serve_video(filename: str):
-    """Serve uploaded video files by filename."""
-    safe_name = Path(filename).name  # Prevent path traversal
-    file_path = UPLOAD_DIR / safe_name
-
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found.")
-
-    return FileResponse(file_path)
-
 
 @app.get("/health")
 async def health_check() -> Dict[str, str]:

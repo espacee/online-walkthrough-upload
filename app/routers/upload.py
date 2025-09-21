@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from uuid import uuid4
 
 import aiofiles
@@ -61,6 +61,43 @@ async def upload_video(
     mount_name = "raw-files" if target_dir == "raw" else "processed-files"
     file_url = request.url_for(mount_name, path=target_name)
     return {"filename": target_name, "url": str(file_url)}
+
+
+@router.get("/files")
+async def list_files() -> Dict[str, List[Dict[str, str]]]:
+    """List all files in raw and final directories."""
+    raw_files = []
+    final_files = []
+
+    if RAW_UPLOAD_DIR.exists():
+        raw_files = [{"name": f.name, "directory": "raw"}
+                     for f in RAW_UPLOAD_DIR.iterdir() if f.is_file()]
+
+    if FINAL_UPLOAD_DIR.exists():
+        final_files = [{"name": f.name, "directory": "final"}
+                       for f in FINAL_UPLOAD_DIR.iterdir() if f.is_file()]
+
+    return {"raw": raw_files, "final": final_files}
+
+
+@router.delete("/files/{filename}")
+async def delete_file(filename: str) -> Dict[str, str]:
+    """Delete a file from either raw or final directory."""
+    safe_name = Path(filename).name
+
+    # Check raw directory first
+    raw_path = RAW_UPLOAD_DIR / safe_name
+    if raw_path.exists():
+        raw_path.unlink()
+        return {"status": "deleted", "filename": safe_name, "directory": "raw"}
+
+    # Check final directory
+    final_path = FINAL_UPLOAD_DIR / safe_name
+    if final_path.exists():
+        final_path.unlink()
+        return {"status": "deleted", "filename": safe_name, "directory": "final"}
+
+    raise HTTPException(status_code=404, detail="File not found in either directory.")
 
 
 @router.delete("/upload/{filename}")

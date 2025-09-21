@@ -318,215 +318,74 @@ class VideoProcessor:
             raise ValueError("At least one processed clip is required for assembly.")
 
         video_ops = (
-            f"settb=AVTB,fps={TARGET_FPS},format={TARGET_PIXEL_FORMAT},setsar=1"
+            f"setpts=PTS-STARTPTS,settb=1/{TARGET_FPS},fps={TARGET_FPS},format={TARGET_PIXEL_FORMAT},setsar=1"
         )
         audio_ops = (
             "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,aresample=48000"
         )
 
         graph_parts: list[str] = []
-        clip_infos: list[dict[str, Optional[str]]] = []
-        eps = 1e-3
+        normalized_video_labels: list[str] = []
+        normalized_audio_labels: list[str] = []
+        for index, _clip in enumerate(processed_clips):
+            v_label = f"v{index}"
+            a_label = f"a{index}"
+            graph_parts.append(f"[{index}:v]{video_ops}[{v_label}]")
+            graph_parts.append(f"[{index}:a]{audio_ops}[{a_label}]")
+            normalized_video_labels.append(v_label)
+            normalized_audio_labels.append(a_label)
 
-        def add_trim(
-            source: str,
-            start: float,
-            duration: float,
-            target: str,
-            *,
-            audio: bool = False,
-        ) -> bool:
-            if duration <= eps:
-                return False
-            start = max(start, 0.0)
-            if audio:
-                graph_parts.append(
-                    f"[{source}]atrim=start={start:.6f}:duration={duration:.6f},asetpts=PTS-STARTPTS[{target}]"
-                )
-            else:
-                graph_parts.append(
-                    f"[{source}]trim=start={start:.6f}:duration={duration:.6f},setpts=PTS-STARTPTS,settb=AVTB[{target}]"
-                )
-            return True
+        current_v = normalized_video_labels[0]
+        current_a = normalized_audio_labels[0]
+        current_duration = processed_clips[0].duration
+        min_fade = 1.0 / TARGET_FPS
+        fade_total = 0.0
 
-        for index, clip in enumerate(processed_clips):
-            video_norm = f"vnorm{index}"
-            audio_norm = f"anorm{index}"
-            graph_parts.append(f"[{index}:v]{video_ops}[{video_norm}]")
-            graph_parts.append(f"[{index}:a]{audio_ops}[{audio_norm}]")
-            clip_infos.append(
-                {
-                    "video_norm": video_norm,
-                    "audio_norm": audio_norm,
-                    "head_v": None,
-                    "head_a": None,
-                    "body_v": None,
-                    "body_a": None,
-                    "tail_v": None,
-                    "tail_a": None,
-                    "fade_in_v": None,
-                    "fade_in_a": None,
-                    "fade_out_v": None,
-                    "fade_out_a": None,
-                    "body_duration": 0.0,
-                    "head_duration": 0.0,
-                    "tail_duration": 0.0,
-                }
-            )
-
-        if len(processed_clips) == 1:
-            clip = processed_clips[0]
-            info = clip_infos[0]
-            segment_v = "vseg0"
-            segment_a = "aseg0"
-            if not add_trim(info["video_norm"], 0.0, clip.duration, segment_v):
-                raise ValueError("Single clip has non-positive duration after trimming.")
-            add_trim(info["audio_norm"], 0.0, clip.duration, segment_a, audio=True)
-            graph_parts.append(f"[{segment_v}][{segment_a}]concat=n=1:v=1:a=1[vout][aout]")
-            logger.debug("Assembly filter graph created | clips=1 fades=0.000")
-            return ";".join(graph_parts), "[vout]", "[aout]", clip.duration
-
-        pair_fades: list[float] = []
-        for idx in range(len(processed_clips) - 1):
-            current = processed_clips[idx]
-            nxt = processed_clips[idx + 1]
-            fade = min(
+        for idx in range(1, len(processed_clips)):
+            next_v = normalized_video_labels[idx]
+            next_a = normalized_audio_labels[idx]
+            next_duration = processed_clips[idx].duration
+            max_fade = min(
                 CROSSFADE_DURATION,
-                current.duration / 2.0,
-                nxt.duration / 2.0,
+                current_duration / 2.0,
+                next_duration / 2.0,
             )
-            if fade < eps:
-                fade = 0.0
-            pair_fades.append(fade)
 
-        segments: list[tuple[str, str, float]] = []
-        total_duration = 0.0
-
-        # First clip head and fade-out
-        first_clip = processed_clips[0]
-        first_info = clip_infos[0]
-        first_fade = pair_fades[0]
-        head_duration = max(first_clip.duration - first_fade, 0.0)
-        head_label_v = "vhead0"
-        head_label_a = "ahead0"
-        if add_trim(first_info["video_norm"], 0.0, head_duration, head_label_v):
-            add_trim(first_info["audio_norm"], 0.0, head_duration, head_label_a, audio=True)
-            segments.append((head_label_v, head_label_a, head_duration))
-            total_duration += head_duration
-            first_info["head_v"] = head_label_v
-            first_info["head_a"] = head_label_a
-            first_info["head_duration"] = head_duration
-        if first_fade > eps:
-            fade_start = max(first_clip.duration - first_fade, 0.0)
-            fade_v = "vfade0_out"
-            fade_a = "afade0_out"
-            if add_trim(first_info["video_norm"], fade_start, first_fade, fade_v):
-                add_trim(first_info["audio_norm"], fade_start, first_fade, fade_a, audio=True)
-                first_info["fade_out_v"] = fade_v
-                first_info["fade_out_a"] = fade_a
-
-        # Middle clips
-        for idx in range(1, len(processed_clips) - 1):
-            clip = processed_clips[idx]
-            info = clip_infos[idx]
-            fade_in = pair_fades[idx - 1]
-            fade_out = pair_fades[idx]
-            if fade_in > eps:
-                fade_v = f"vfade{idx}_in"
-                fade_a = f"afade{idx}_in"
-                if add_trim(info["video_norm"], 0.0, fade_in, fade_v):
-                    add_trim(info["audio_norm"], 0.0, fade_in, fade_a, audio=True)
-                    info["fade_in_v"] = fade_v
-                    info["fade_in_a"] = fade_a
-            body_start = max(fade_in, 0.0)
-            body_end = max(clip.duration - fade_out, body_start)
-            body_duration = max(body_end - body_start, 0.0)
-            if body_duration > eps:
-                body_v = f"vbody{idx}"
-                body_a = f"abody{idx}"
-                if add_trim(info["video_norm"], body_start, body_duration, body_v):
-                    add_trim(info["audio_norm"], body_start, body_duration, body_a, audio=True)
-                    info["body_v"] = body_v
-                    info["body_a"] = body_a
-                    info["body_duration"] = body_duration
-            if fade_out > eps:
-                fade_start = max(clip.duration - fade_out, 0.0)
-                fade_v = f"vfade{idx}_out"
-                fade_a = f"afade{idx}_out"
-                if add_trim(info["video_norm"], fade_start, fade_out, fade_v):
-                    add_trim(info["audio_norm"], fade_start, fade_out, fade_a, audio=True)
-                    info["fade_out_v"] = fade_v
-                    info["fade_out_a"] = fade_a
-
-        # Last clip fade-in and tail
-        last_idx = len(processed_clips) - 1
-        last_clip = processed_clips[last_idx]
-        last_info = clip_infos[last_idx]
-        last_fade = pair_fades[-1]
-        if last_fade > eps:
-            fade_v = f"vfade{last_idx}_in"
-            fade_a = f"afade{last_idx}_in"
-            if add_trim(last_info["video_norm"], 0.0, last_fade, fade_v):
-                add_trim(last_info["audio_norm"], 0.0, last_fade, fade_a, audio=True)
-                last_info["fade_in_v"] = fade_v
-                last_info["fade_in_a"] = fade_a
-        tail_start = max(last_fade, 0.0)
-        tail_duration = max(last_clip.duration - tail_start, 0.0)
-        tail_v = f"vtail{last_idx}"
-        tail_a = f"atail{last_idx}"
-        if add_trim(last_info["video_norm"], tail_start, tail_duration, tail_v):
-            add_trim(last_info["audio_norm"], tail_start, tail_duration, tail_a, audio=True)
-            last_info["tail_v"] = tail_v
-            last_info["tail_a"] = tail_a
-            last_info["tail_duration"] = tail_duration
-
-        # Assemble segments with crossfades
-        for pair_idx, fade in enumerate(pair_fades):
-            prev_info = clip_infos[pair_idx]
-            next_info = clip_infos[pair_idx + 1]
-            if fade > eps and prev_info.get("fade_out_v") and next_info.get("fade_in_v"):
-                vxf = f"vxf{pair_idx}"
-                axf = f"axf{pair_idx}"
+            if max_fade < min_fade:
+                cat_v = f"vcat{idx}"
+                cat_a = f"acat{idx}"
                 graph_parts.append(
-                    f"[{prev_info['fade_out_v']}][{next_info['fade_in_v']}]xfade=transition=fade:duration={fade:.6f}:offset=0[{vxf}]"
+                    f"[{current_v}][{next_v}]concat=n=2:v=1:a=0[{cat_v}]"
                 )
                 graph_parts.append(
-                    f"[{prev_info['fade_out_a']}][{next_info['fade_in_a']}]acrossfade=d={fade:.6f}:curve1=tri:curve2=tri[{axf}]"
+                    f"[{current_a}][{next_a}]concat=n=2:v=0:a=1[{cat_a}]"
                 )
-                segments.append((vxf, axf, fade))
-                total_duration += fade
+                current_v = cat_v
+                current_a = cat_a
+                current_duration += next_duration
             else:
-                logger.warning(
-                    "Crossfade skipped for pair %d due to insufficient duration; performing hard cut",
-                    pair_idx,
+                fade = max_fade
+                offset = max(current_duration - fade, 0.0)
+                out_v = f"vxf{idx}"
+                out_a = f"axf{idx}"
+                graph_parts.append(
+                    f"[{current_v}][{next_v}]xfade=transition=fade:duration={fade:.6f}:offset={offset:.6f}[{out_v}]"
                 )
-            body_v = next_info.get("body_v")
-            body_a = next_info.get("body_a")
-            body_duration = next_info.get("body_duration", 0.0)
-            if body_v and body_duration > eps:
-                segments.append((body_v, body_a, body_duration))
-                total_duration += body_duration
+                graph_parts.append(
+                    f"[{current_a}][{next_a}]acrossfade=d={fade:.6f}:curve1=tri:curve2=tri[{out_a}]"
+                )
+                current_v = out_v
+                current_a = out_a
+                current_duration = current_duration + next_duration - fade
+                fade_total += fade
 
-        # Append final tail
-        if last_info.get("tail_v") and last_info.get("tail_duration", 0.0) > eps:
-            segments.append((last_info["tail_v"], last_info["tail_a"], last_info["tail_duration"]))
-            total_duration += last_info["tail_duration"]
-
-        if not segments:
-            raise ValueError("No segments generated for concat pipeline.")
-
-        concat_inputs = ''.join(f"[{v}][{a}]" for v, a, _ in segments)
-        graph_parts.append(
-            f"{concat_inputs}concat=n={len(segments)}:v=1:a=1[vout][aout]"
-        )
-
-        fade_total = sum(f for f in pair_fades)
+        filter_graph = ';'.join(graph_parts)
         logger.debug(
             "Assembly filter graph created | clips=%d fades=%.3fs",
             len(processed_clips),
             fade_total,
         )
-        return ";".join(graph_parts), "[vout]", "[aout]", total_duration
+        return filter_graph, f"[{current_v}]", f"[{current_a}]", current_duration
 
     def _cleanup_two_pass_logs(self, passlog: Path) -> None:
         base = Path(str(passlog))

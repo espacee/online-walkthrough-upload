@@ -318,7 +318,7 @@ class VideoProcessor:
             raise ValueError("At least one processed clip is required for assembly.")
 
         video_ops = (
-            f"setpts=PTS-STARTPTS,fps={TARGET_FPS},format={TARGET_PIXEL_FORMAT},setsar=1"
+            f"settb=AVTB,fps={TARGET_FPS},format={TARGET_PIXEL_FORMAT},setsar=1"
         )
         audio_ops = (
             "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,aresample=48000"
@@ -345,7 +345,7 @@ class VideoProcessor:
                 )
             else:
                 graph_parts.append(
-                    f"[{source}]trim=start={start:.6f}:duration={duration:.6f},setpts=PTS-STARTPTS[{target}]"
+                    f"[{source}]trim=start={start:.6f}:duration={duration:.6f},setpts=PTS-STARTPTS,settb=AVTB[{target}]"
                 )
             return True
 

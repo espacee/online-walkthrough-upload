@@ -571,7 +571,6 @@ class VideoProcessor:
                 f"input={transform_path}:smoothing=15:maxshift=30:zoom=0.95:optalgo=gauss"
             ),
             self._normalization_filter_chain(include_format=False),
-            self._color_filter_chain(),
             f"format={TARGET_PIXEL_FORMAT}",
             "setsar=1",
         ]

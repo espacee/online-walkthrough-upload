@@ -6,7 +6,7 @@ import aiofiles
 import re
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
-from app.paths import RAW_UPLOAD_DIR
+from app.paths import RAW_UPLOAD_DIR, FINAL_UPLOAD_DIR
 
 router = APIRouter(tags=["uploads"])
 
@@ -41,19 +41,25 @@ async def upload_video(
     request: Request,
     file: UploadFile = File(...),
     filename: Optional[str] = Form(None),
+    target_dir: str = Form("raw"),
 ) -> Dict[str, str]:
     """Accept video uploads and return a URL where the file can be accessed."""
     if not file.content_type or not file.content_type.startswith("video/"):
         raise HTTPException(status_code=400, detail="Only video files are allowed.")
 
-    RAW_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    if target_dir not in ["raw", "final"]:
+        raise HTTPException(status_code=400, detail="target_dir must be 'raw' or 'final'")
+
+    upload_dir = RAW_UPLOAD_DIR if target_dir == "raw" else FINAL_UPLOAD_DIR
+    upload_dir.mkdir(parents=True, exist_ok=True)
 
     target_name = build_target_filename(filename, file.filename)
-    file_path = RAW_UPLOAD_DIR / target_name
+    file_path = upload_dir / target_name
 
     await save_upload_file(file, file_path)
 
-    file_url = request.url_for("raw-files", path=target_name)
+    mount_name = "raw-files" if target_dir == "raw" else "processed-files"
+    file_url = request.url_for(mount_name, path=target_name)
     return {"filename": target_name, "url": str(file_url)}
 
 

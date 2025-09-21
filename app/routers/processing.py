@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import Dict, List
 
@@ -8,6 +9,7 @@ from app.paths import FINAL_UPLOAD_DIR, RAW_UPLOAD_DIR
 from app.services.video_processor import VideoProcessor
 
 router = APIRouter(tags=["processing"])
+logger = logging.getLogger(__name__)
 
 
 class ProcessRequest(BaseModel):
@@ -15,21 +17,49 @@ class ProcessRequest(BaseModel):
     clips: List[str] = Field(..., min_items=1, description="List of raw clip filenames")
 
 
-@router.post("/process")
+@router.post("/process-walkthrough")
 async def process_video(request: Request, payload: ProcessRequest) -> Dict[str, str]:
     processor = VideoProcessor(payload.project_id, RAW_UPLOAD_DIR, FINAL_UPLOAD_DIR)
 
     try:
-        output_path = processor.concatenate_clips(payload.clips)
+        logger.info(
+            "Starting walkthrough processing for project %s with %d clips",
+            payload.project_id,
+            len(payload.clips),
+        )
+        output_path = processor.process_walkthrough(payload.clips)
     except FileNotFoundError as exc:
+        logger.error(
+            "Clip not found during processing for project %s: %s",
+            payload.project_id,
+            exc,
+            exc_info=exc,
+        )
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
+        logger.error(
+            "Validation error during processing for project %s: %s",
+            payload.project_id,
+            exc,
+            exc_info=exc,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
+        logger.error(
+            "FFmpeg processing failed for project %s: %s",
+            payload.project_id,
+            exc,
+            exc_info=exc,
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     output_name = Path(output_path).name
     output_url = request.url_for("processed-files", path=output_name)
+    logger.info(
+        "Walkthrough processing completed for project %s: %s",
+        payload.project_id,
+        output_name,
+    )
     return {
         "project_id": payload.project_id,
         "filename": output_name,

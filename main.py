@@ -1,10 +1,11 @@
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 from uuid import uuid4
 import aiofiles
+import re
 
 # Base directory for storing uploaded files
 UPLOAD_DIR = Path("uploads")
@@ -32,20 +33,42 @@ async def save_upload_file(upload_file: UploadFile, destination: Path) -> None:
             await out_file.write(chunk)
 
 
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def build_target_filename(proposed_name: Optional[str], original_filename: str) -> str:
+    """Return a safe filename, preserving extension and preventing traversal."""
+    extension = Path(original_filename).suffix or ".mp4"
+    extension = extension.lower()
+
+    if proposed_name:
+        cleaned = _UNSAFE_FILENAME_CHARS.sub("_", proposed_name.strip())
+        cleaned = cleaned.strip("._") or "video"
+        # Ensure users cannot sneak path separators
+        base_name = Path(cleaned).name
+        if not Path(base_name).suffix:
+            return f"{base_name}{extension}"
+        return f"{Path(base_name).stem}{extension}"
+
+    return f"{uuid4().hex}{extension}"
+
+
 @app.post("/api/upload")
-async def upload_video(request: Request, file: UploadFile = File(...)) -> Dict[str, str]:
+async def upload_video(
+    request: Request,
+    file: UploadFile = File(...),
+    filename: Optional[str] = Form(None),
+) -> Dict[str, str]:
     """Accept video uploads and return a URL where the file can be accessed."""
     if not file.content_type or not file.content_type.startswith("video/"):
         raise HTTPException(status_code=400, detail="Only video files are allowed.")
 
-    original_extension = Path(file.filename).suffix or ".mp4"
-    safe_extension = original_extension.lower()
-    unique_name = f"{uuid4().hex}{safe_extension}"
-    file_path = UPLOAD_DIR / unique_name
+    target_name = build_target_filename(filename, file.filename)
+    file_path = UPLOAD_DIR / target_name
 
     await save_upload_file(file, file_path)
 
-    file_url = request.url_for("serve_video", filename=unique_name)
+    file_url = request.url_for("serve_video", filename=target_name)
     return {"url": str(file_url)}
 
 

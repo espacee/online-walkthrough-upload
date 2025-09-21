@@ -280,6 +280,9 @@ class VideoProcessor:
 
     def _run_two_pass_encode(self, source_path: Path, output_path: Path, passlog: Path) -> None:
         gop = TARGET_FPS * 2
+        target_bitrate = "8M"
+        max_bitrate = "12M"
+        bufsize = "24M"
         first_pass = [
             "ffmpeg",
             "-y",
@@ -291,12 +294,14 @@ class VideoProcessor:
             "libx264",
             "-preset",
             "slow",
-            "-crf",
-            "19",
+            "-b:v",
+            target_bitrate,
+            "-maxrate",
+            max_bitrate,
+            "-bufsize",
+            bufsize,
             "-pass",
             "1",
-            "-b:v",
-            "0",
             "-g",
             str(gop),
             "-keyint_min",
@@ -323,12 +328,14 @@ class VideoProcessor:
             "libx264",
             "-preset",
             "slow",
-            "-crf",
-            "19",
+            "-b:v",
+            target_bitrate,
+            "-maxrate",
+            max_bitrate,
+            "-bufsize",
+            bufsize,
             "-pass",
             "2",
-            "-b:v",
-            "0",
             "-g",
             str(gop),
             "-keyint_min",

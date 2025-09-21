@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import List
+from typing import Iterable
 
 
 class VideoProcessor:
@@ -15,11 +15,12 @@ class VideoProcessor:
         self.final_dir = final_dir
         self.final_dir.mkdir(parents=True, exist_ok=True)
 
-    def concatenate_clips(self, input_paths: List[str]) -> str:
-        if not input_paths:
+    def concatenate_clips(self, clip_names: Iterable[str]) -> Path:
+        clip_list = list(clip_names)
+        if not clip_list:
             raise ValueError("At least one clip is required for processing.")
 
-        resolved_inputs = [self._resolve_path(path) for path in input_paths]
+        resolved_inputs = [self._resolve_path(name) for name in clip_list]
         output_path = self.final_dir / f"{self.project_id}_final.mp4"
 
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as concat_file:
@@ -49,7 +50,7 @@ class VideoProcessor:
         finally:
             concat_list_path.unlink(missing_ok=True)
 
-        return str(output_path)
+        return output_path
 
     def _resolve_path(self, clip_name: str) -> Path:
         candidate = Path(clip_name)
@@ -57,7 +58,7 @@ class VideoProcessor:
             candidate = self.raw_dir / candidate
         candidate = candidate.resolve()
         if not candidate.exists():
-            raise FileNotFoundError(f"Clip not found: {candidate}")
-        if self.raw_dir not in candidate.parents and candidate != self.raw_dir:
-            raise ValueError(f"Clip path outside raw directory: {candidate}")
+            raise FileNotFoundError(f"Clip not found: {candidate.name}")
+        if self.raw_dir.resolve() not in candidate.parents and candidate != self.raw_dir.resolve():
+            raise ValueError(f"Clip path outside raw directory: {candidate.name}")
         return candidate

@@ -1,54 +1,65 @@
-# Online Walkthrough Backend Monorepo
+# Online Walkthrough API
 
-This repository contains the APIs behind the Online Walkthrough experience. It is organised as a monorepo with two FastAPI services that can be deployed independently (for example, as separate Coolify applications).
+A single FastAPI service that accepts raw walkthrough clip uploads and processes them into final concatenated videos. The service exposes dedicated routers for uploading and processing while sharing the same storage backend.
 
-## Services
+## Features
 
-### `video-upload-api`
-- Handles multipart video uploads at `POST /api/upload`.
-- Validates that uploads are video files and stores them in `uploads/`.
-- Optional `filename` form field lets clients persist clips using meaningful names (e.g. `123_front`).
-- Serves files via `GET /files/{filename}` and static hosting mounted at `/files`.
+- `POST /api/upload` – multipart upload for video clips. Optional `filename` field lets you control saved names (e.g. `123_front`).
+- `POST /api/process` – JSON request with `project_id` and `clips` list to concatenate clips using FFmpeg.
+- Static delivery of uploaded clips at `/files/{filename}` (served from `uploads/raw/`).
+- Static delivery of processed walkthroughs at `/processed/{filename}` (served from `uploads/final/`).
+- CORS enabled for easy use from web or React Native clients.
 - Health probe at `GET /health`.
-- Docker image listens on port `8000`.
 
-**Run locally**
-```bash
-cd video-upload-api
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+## Project Layout
+
+```
+app/
+  ├── main.py
+  ├── paths.py
+  ├── routers/
+  │   ├── __init__.py
+  │   ├── processing.py
+  │   └── upload.py
+  └── services/
+      ├── __init__.py
+      └── video_processor.py
+Dockerfile
+requirements.txt
+uploads/
+  ├── raw/
+  └── final/
 ```
 
-### `video-processing-api`
-- Accepts JSON requests at `POST /api/process` containing a `project_id` and `clips` list with raw clip filenames.
-- Uses FFmpeg (available in the container) to concatenate the clip sequence into `uploads/final/{project_id}_final.mp4`.
-- Serves processed videos via `GET /processed/{filename}` and exposes the `uploads/final` directory at `/processed/static`.
-- Health probe at `GET /health`.
-- Docker image listens on port `8001`.
+## Running Locally
 
-> **Note:** The service expects raw clips to be present in `uploads/raw/`. Ensure FFmpeg is available when running outside of Docker.
+```bash
+pip install -r requirements.txt
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Uploads are stored under `uploads/raw/`, and processed outputs are written to `uploads/final/`. When running outside Docker, ensure FFmpeg is installed and available on the PATH.
 
 ## Deploying with Coolify
 
-Deploy each service as its own Coolify app:
-1. Point the app to this repository and set the working directory to either `video-upload-api` or `video-processing-api`.
-2. Choose the Dockerfile build strategy (Coolify will automatically use the Dockerfile inside that directory).
-3. Expose the appropriate port (`8000` for uploads, `8001` for processing) and configure domains as needed.
-4. Persist the `uploads/` directory (Coolify volume) if you need files to survive container redeployments.
+1. Create a Coolify app pointing to this repository. Set the working directory to the repo root.
+2. Use the provided `Dockerfile` build. It installs FFmpeg and Python dependencies automatically.
+3. Expose port `8000` and map your domain (e.g. `/api/upload` and `/api/process`).
+4. Attach a persistent volume mounted at `/app/uploads` so both raw and processed videos survive restarts.
+5. Redeploy to apply configuration changes.
 
-## Repository Structure
+## Workflow
 
-```
-video-upload-api/
-  ├── Dockerfile
-  ├── main.py
-  ├── requirements.txt
-  └── uploads/
-video-processing-api/
-  ├── Dockerfile
-  ├── main.py
-  ├── requirements.txt
-  └── video_processor.py
-README.md
+1. `POST /api/upload` each raw clip. The response includes the stored filename and a URL under `/files/`.
+2. Once all clips for a project are uploaded, call `POST /api/process` with:
+
+```json
+{
+  "project_id": "ABC123",
+  "clips": ["ABC123_front.mp4", "ABC123_side.mp4"]
+}
 ```
 
-Each service remains self-contained so you can continue iterating independently while keeping a single source of truth for the backend code.
+3. The response returns the processed filename and a `processed` URL ready for playback.
+
+Because uploads and processing run in one service, there is no need for cross-service storage mounts—both routers operate on the same shared filesystem.

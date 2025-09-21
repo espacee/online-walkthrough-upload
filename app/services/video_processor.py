@@ -554,7 +554,6 @@ class VideoProcessor:
     def _color_filter_chain(self) -> str:
         return ",".join(
             [
-                "colorlevels=rin=0.023:gin=0.023:bin=0.023:rout=0.975:gout=0.975:bout=0.975",
                 "histeq=strength=0.6:intensity=0.0",
                 "eq=contrast=1.08:brightness=0.03:saturation=1.12",
             ]

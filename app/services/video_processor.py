@@ -186,11 +186,6 @@ class VideoProcessor:
         if not processed_clips:
             raise ValueError("At least one processed clip is required for assembly.")
 
-        if len(processed_clips) == 1:
-            source_path = processed_clips[0].path
-        else:
-            source_path = self._crossfade_clips(processed_clips, working_dir)
-
         output_path = self.final_dir / f"{self.project_id}_final.mp4"
         logger.info(
             "Running two-pass encode for project %s into %s",
@@ -198,98 +193,52 @@ class VideoProcessor:
             output_path.name,
         )
         passlog = working_dir / f"{self.project_id}_2pass"
-        self._run_two_pass_encode(source_path, output_path, passlog)
+        filter_graph, video_label, audio_label, combined_duration = self._build_assembly_filter(
+            processed_clips
+        )
+        input_args: list[str] = []
+        for clip in processed_clips:
+            input_args.extend(["-i", str(clip.path)])
+        self._run_two_pass_encode(
+            input_args,
+            filter_graph,
+            video_label,
+            audio_label,
+            output_path,
+            passlog,
+        )
         self._cleanup_two_pass_logs(passlog)
 
-        expected_duration = self._expected_final_duration(processed_clips)
+        expected_duration = combined_duration
         self._validate_final_output(output_path, expected_duration)
         return output_path
 
-    def _crossfade_clips(
-        self, processed_clips: Sequence[ProcessedClip], working_dir: Path
-    ) -> Path:
-        current_path = processed_clips[0].path
-        current_duration = processed_clips[0].duration
-        current_frames = processed_clips[0].frame_count
-
-        for index, clip in enumerate(processed_clips[1:], start=1):
-            crossfade_duration = min(CROSSFADE_DURATION, current_duration / 2, clip.duration / 2)
-            if crossfade_duration <= 0:
-                crossfade_duration = min(CROSSFADE_DURATION, current_duration, clip.duration)
-            crossfade_offset = max(current_duration - crossfade_duration, 0)
-            output_path = working_dir / f"crossfade_{index:03d}.mp4"
-            filter_complex = (
-                f"[0:v]format={TARGET_PIXEL_FORMAT},setsar=1[v0];"
-                f"[1:v]format={TARGET_PIXEL_FORMAT},setsar=1[v1];"
-                f"[v0][v1]xfade=transition=fade:duration={crossfade_duration:.3f}:offset={crossfade_offset:.3f}[vout];"
-                f"[0:a][1:a]acrossfade=d={crossfade_duration:.3f}:curve1=tri:curve2=tri[aout]"
-            )
-
-            command = [
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-i",
-                str(current_path),
-                "-i",
-                str(clip.path),
-                "-filter_complex",
-                filter_complex,
-                "-map",
-                "[vout]",
-                "-map",
-                "[aout]",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "medium",
-                "-crf",
-                "16",
-                "-pix_fmt",
-                TARGET_PIXEL_FORMAT,
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-                "-movflags",
-                "+faststart",
-                str(output_path),
-            ]
-
-            self._run_ffmpeg(command, f"crossfade clips step {index}")
-            if current_path not in {processed_clips[0].path, clip.path}:
-                self._cleanup_file(current_path)
-            current_path = output_path
-            current_duration = self._probe_duration(current_path)
-            current_frames = self._probe_frame_count(current_path)
-            logger.debug(
-                "Crossfade step %d duration %.3fs frames %d",
-                index,
-                current_duration,
-                current_frames,
-            )
-            if clip.path != current_path:
-                self._cleanup_file(clip.path)
-
-        first_clip_path = processed_clips[0].path
-        if first_clip_path != current_path:
-            self._cleanup_file(first_clip_path)
-
-        return current_path
-
-    def _run_two_pass_encode(self, source_path: Path, output_path: Path, passlog: Path) -> None:
+    def _run_two_pass_encode(
+        self,
+        input_args: list[str],
+        filter_graph: str,
+        video_label: str,
+        audio_label: str,
+        output_path: Path,
+        passlog: Path,
+    ) -> None:
         gop = TARGET_FPS * 2
         target_bitrate = "8M"
         max_bitrate = "12M"
         bufsize = "24M"
-        first_pass = [
+        common = [
             "ffmpeg",
             "-y",
             "-loglevel",
             "error",
-            "-i",
-            str(source_path),
+        ]
+        first_pass = common + input_args + [
+            "-filter_complex",
+            filter_graph,
+            "-map",
+            video_label,
+            "-map",
+            audio_label,
             "-c:v",
             "libx264",
             "-preset",
@@ -306,24 +255,25 @@ class VideoProcessor:
             str(gop),
             "-keyint_min",
             str(gop),
+            "-sc_threshold",
+            "0",
             "-pix_fmt",
             TARGET_PIXEL_FORMAT,
             "-passlogfile",
             str(passlog),
-            "-an",
             "-f",
             "mp4",
             "/dev/null",
         ]
         self._run_ffmpeg(first_pass, "two-pass encode pass1")
 
-        second_pass = [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-i",
-            str(source_path),
+        second_pass = common + input_args + [
+            "-filter_complex",
+            filter_graph,
+            "-map",
+            video_label,
+            "-map",
+            audio_label,
             "-c:v",
             "libx264",
             "-preset",
@@ -340,6 +290,8 @@ class VideoProcessor:
             str(gop),
             "-keyint_min",
             str(gop),
+            "-sc_threshold",
+            "0",
             "-pix_fmt",
             TARGET_PIXEL_FORMAT,
             "-c:a",
@@ -354,6 +306,52 @@ class VideoProcessor:
         ]
         self._run_ffmpeg(second_pass, "two-pass encode pass2")
 
+    def _build_assembly_filter(
+        self, processed_clips: Sequence[ProcessedClip]
+    ) -> tuple[str, str, str, float]:
+        video_ops = (
+            f"setpts=PTS-STARTPTS,fps={TARGET_FPS},format={TARGET_PIXEL_FORMAT},setsar=1"
+        )
+        audio_ops = (
+            "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,aresample=48000"
+        )
+        parts: list[str] = []
+        current_v_label = "v0"
+        current_a_label = "a0"
+        parts.append(f"[0:v]{video_ops}[{current_v_label}]")
+        parts.append(f"[0:a]{audio_ops}[{current_a_label}]")
+        combined_duration = processed_clips[0].duration
+        fade_total = 0.0
+        for index, clip in enumerate(processed_clips[1:], start=1):
+            v_label = f"v{index}"
+            a_label = f"a{index}"
+            parts.append(f"[{index}:v]{video_ops}[{v_label}]")
+            parts.append(f"[{index}:a]{audio_ops}[{a_label}]")
+            prev_duration = processed_clips[index - 1].duration
+            fade = min(CROSSFADE_DURATION, prev_duration / 2, clip.duration / 2)
+            if fade <= 0.0:
+                fade = min(CROSSFADE_DURATION, prev_duration, clip.duration)
+            offset = max(combined_duration - fade, 0.0)
+            next_v_label = f"vxf{index}"
+            next_a_label = f"axf{index}"
+            parts.append(
+                f"[{current_v_label}][{v_label}]xfade=transition=fade:duration={fade:.3f}:offset={offset:.3f}[{next_v_label}]"
+            )
+            parts.append(
+                f"[{current_a_label}][{a_label}]acrossfade=d={fade:.3f}:curve1=tri:curve2=tri[{next_a_label}]"
+            )
+            current_v_label = next_v_label
+            current_a_label = next_a_label
+            combined_duration = combined_duration + clip.duration - fade
+            fade_total += fade
+        filter_graph = ';'.join(parts)
+        logger.debug(
+            "Assembly filter graph created | clips=%d fades=%.3fs",
+            len(processed_clips),
+            fade_total,
+        )
+        return filter_graph, f"[{current_v_label}]", f"[{current_a_label}]", combined_duration
+
     def _cleanup_two_pass_logs(self, passlog: Path) -> None:
         base = Path(str(passlog))
         candidates = [
@@ -365,13 +363,6 @@ class VideoProcessor:
         ]
         for candidate in candidates:
             self._cleanup_file(candidate)
-
-    def _expected_final_duration(self, clips: Sequence[ProcessedClip]) -> float:
-        if not clips:
-            return 0.0
-        total = sum(clip.duration for clip in clips)
-        crossfade_total = CROSSFADE_DURATION * max(len(clips) - 1, 0)
-        return max(total - crossfade_total, 0.0)
 
     def _detect_trim(self, input_path: Path, total_duration: float) -> TrimInfo:
         command = [
@@ -520,8 +511,16 @@ class VideoProcessor:
                 "medium",
                 "-crf",
                 "18",
+                "-g",
+                str(TARGET_FPS * 2),
+                "-keyint_min",
+                str(TARGET_FPS * 2),
+                "-sc_threshold",
+                "0",
                 "-pix_fmt",
                 TARGET_PIXEL_FORMAT,
+                "-movflags",
+                "+faststart",
                 str(output_path),
             ]
         )

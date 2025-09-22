@@ -51,14 +51,11 @@ class VideoProcessor:
         project_id: str,
         raw_dir: Path,
         final_dir: Path,
-        *,
-        audio_enhancements: bool = True,
     ) -> None:
         self.project_id = project_id
         self.raw_dir = raw_dir
         self.final_dir = final_dir
         self.final_dir.mkdir(parents=True, exist_ok=True)
-        self.audio_enhancements = audio_enhancements
         self.ffmpeg_retries = DEFAULT_MAX_RETRIES
 
     def process_walkthrough(self, clip_names: Iterable[str]) -> Path:
@@ -155,24 +152,18 @@ class VideoProcessor:
         )
 
         transform_path = working_dir / f"transform_{index:03d}.trf"
-        stabilized_path = working_dir / f"stabilized_{index:03d}.mp4"
         processed_path = working_dir / f"processed_{index:03d}.mp4"
-        audio_path = working_dir / f"audio_{index:03d}.m4a"
 
         try:
-            self._extract_audio(input_path, audio_path, trim_info, trimmed_duration)
             self._stabilize_and_color(
                 input_path,
-                stabilized_path,
+                processed_path,
                 transform_path,
                 trim_info,
                 trimmed_duration,
             )
-            self._remux_audio(stabilized_path, audio_path, processed_path)
         finally:
             transform_path.unlink(missing_ok=True)
-            audio_path.unlink(missing_ok=True)
-            stabilized_path.unlink(missing_ok=True)
 
         duration = self._probe_duration(processed_path)
         frames = self._probe_frame_count(processed_path)
@@ -193,7 +184,7 @@ class VideoProcessor:
             output_path.name,
         )
         passlog = working_dir / f"{self.project_id}_2pass"
-        filter_graph, video_label, audio_label, combined_duration = self._build_assembly_filter(
+        filter_graph, video_label, combined_duration = self._build_assembly_filter(
             processed_clips
         )
         input_args: list[str] = []
@@ -208,7 +199,6 @@ class VideoProcessor:
             input_args,
             filter_graph,
             video_label,
-            audio_label,
             output_path,
             passlog,
         )
@@ -223,7 +213,6 @@ class VideoProcessor:
         input_args: list[str],
         filter_graph: str,
         video_label: str,
-        audio_label: str,
         output_path: Path,
         passlog: Path,
     ) -> None:
@@ -242,8 +231,6 @@ class VideoProcessor:
             filter_graph,
             "-map",
             video_label,
-            "-map",
-            audio_label,
             "-c:v",
             "libx264",
             "-preset",
@@ -266,6 +253,7 @@ class VideoProcessor:
             TARGET_PIXEL_FORMAT,
             "-passlogfile",
             str(passlog),
+            "-an",
             "-f",
             "mp4",
             "/dev/null",
@@ -277,8 +265,6 @@ class VideoProcessor:
             filter_graph,
             "-map",
             video_label,
-            "-map",
-            audio_label,
             "-c:v",
             "libx264",
             "-preset",
@@ -299,51 +285,39 @@ class VideoProcessor:
             "0",
             "-pix_fmt",
             TARGET_PIXEL_FORMAT,
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
             "-movflags",
             "+faststart",
             "-passlogfile",
             str(passlog),
+            "-an",
             str(output_path),
         ]
         self._run_ffmpeg(second_pass, "two-pass encode pass2")
 
     def _build_assembly_filter(
         self, processed_clips: Sequence[ProcessedClip]
-    ) -> tuple[str, str, str, float]:
+    ) -> tuple[str, str, float]:
         if not processed_clips:
             raise ValueError("At least one processed clip is required for assembly.")
 
         video_ops = (
             f"setpts=PTS-STARTPTS,settb=1/{TARGET_FPS},fps={TARGET_FPS},format={TARGET_PIXEL_FORMAT},setsar=1"
         )
-        audio_ops = (
-            "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,aresample=48000"
-        )
 
         graph_parts: list[str] = []
         normalized_video_labels: list[str] = []
-        normalized_audio_labels: list[str] = []
         for index, _clip in enumerate(processed_clips):
             v_label = f"v{index}"
-            a_label = f"a{index}"
             graph_parts.append(f"[{index}:v]{video_ops}[{v_label}]")
-            graph_parts.append(f"[{index}:a]{audio_ops}[{a_label}]")
             normalized_video_labels.append(v_label)
-            normalized_audio_labels.append(a_label)
 
         current_v = normalized_video_labels[0]
-        current_a = normalized_audio_labels[0]
         current_duration = processed_clips[0].duration
         min_fade = 1.0 / TARGET_FPS
         fade_total = 0.0
 
         for idx in range(1, len(processed_clips)):
             next_v = normalized_video_labels[idx]
-            next_a = normalized_audio_labels[idx]
             next_duration = processed_clips[idx].duration
             max_fade = min(
                 CROSSFADE_DURATION,
@@ -353,29 +327,19 @@ class VideoProcessor:
 
             if max_fade < min_fade:
                 cat_v = f"vcat{idx}"
-                cat_a = f"acat{idx}"
                 graph_parts.append(
                     f"[{current_v}][{next_v}]concat=n=2:v=1:a=0[{cat_v}]"
                 )
-                graph_parts.append(
-                    f"[{current_a}][{next_a}]concat=n=2:v=0:a=1[{cat_a}]"
-                )
                 current_v = cat_v
-                current_a = cat_a
                 current_duration += next_duration
             else:
                 fade = max_fade
                 offset = max(current_duration - fade, 0.0)
                 out_v = f"vxf{idx}"
-                out_a = f"axf{idx}"
                 graph_parts.append(
                     f"[{current_v}][{next_v}]xfade=transition=fade:duration={fade:.6f}:offset={offset:.6f}[{out_v}]"
                 )
-                graph_parts.append(
-                    f"[{current_a}][{next_a}]acrossfade=d={fade:.6f}:curve1=tri:curve2=tri[{out_a}]"
-                )
                 current_v = out_v
-                current_a = out_a
                 current_duration = current_duration + next_duration - fade
                 fade_total += fade
 
@@ -385,7 +349,7 @@ class VideoProcessor:
             len(processed_clips),
             fade_total,
         )
-        return filter_graph, f"[{current_v}]", f"[{current_a}]", current_duration
+        return filter_graph, f"[{current_v}]", current_duration
 
     def _cleanup_two_pass_logs(self, passlog: Path) -> None:
         base = Path(str(passlog))
@@ -450,44 +414,6 @@ class VideoProcessor:
         start_trim = min(start_trim, total_duration * 0.5)
         end_trim = min(end_trim, total_duration - start_trim)
         return TrimInfo(start=start_trim, end=end_trim)
-
-    def _extract_audio(
-        self,
-        input_path: Path,
-        output_path: Path,
-        trim_info: TrimInfo,
-        trimmed_duration: float,
-    ) -> None:
-        command = [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-i",
-            str(input_path),
-        ]
-        if trim_info.start > 0:
-            command.extend(["-ss", f"{trim_info.start:.3f}"])
-        command.extend(["-t", f"{trimmed_duration:.3f}"])
-        audio_filters: list[str] = []
-        if getattr(self, "audio_enhancements", True):
-            audio_filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
-            audio_filters.append("afftdn=nf=-25")
-        if audio_filters:
-            command.extend(["-af", ",".join(audio_filters)])
-        command.extend(
-            [
-                "-vn",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-                "-ar",
-                "48000",
-                str(output_path),
-            ]
-        )
-        self._run_ffmpeg(command, f"audio extraction for {input_path.name}")
 
     def _stabilize_and_color(
         self,
@@ -585,42 +511,6 @@ class VideoProcessor:
         if include_format:
             parts.extend([f"format={TARGET_PIXEL_FORMAT}", "setsar=1"])
         return ",".join(parts)
-
-    def _color_filter_chain(self) -> str:
-        return ",".join(
-            [
-                "histeq=strength=0.6:intensity=0.0",
-                "eq=contrast=1.08:brightness=0.03:saturation=1.12",
-            ]
-        )
-
-    def _remux_audio(self, video_path: Path, audio_path: Path, output_path: Path) -> None:
-        command = [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-i",
-            str(video_path),
-            "-i",
-            str(audio_path),
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-movflags",
-            "+faststart",
-            "-shortest",
-            str(output_path),
-        ]
-        self._run_ffmpeg(command, f"remux audio for {video_path.name}")
-
     def _probe_duration(self, path: Path) -> float:
         result = self._run_ffprobe(
             [
